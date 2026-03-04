@@ -112,7 +112,7 @@ pub struct Componentize {
     /// a `site-packages` subdirectory, which will likewise be appended.  If the
     /// previous options fail, the `site` module in python will be used to get
     /// the `site-packages`
-    #[arg(short = 'p', long, default_value = ".")]
+    #[arg(short = 'p', long)]
     pub python_path: Vec<String>,
 
     /// Specify which world to use with which Python module.  May be specified
@@ -142,6 +142,49 @@ pub struct Componentize {
     /// randomness is required.
     #[arg(short = 's', long)]
     pub stub_wasi: bool,
+
+    /// If set, skip the memory snapshot optimization.  Instead of
+    /// pre-initializing the Python interpreter at build time and snapshotting
+    /// its memory, the component will initialize Python at runtime, reading
+    /// source files from WASI preopened directories.
+    ///
+    /// When this flag is used, a `--runtime-dir` directory is populated with
+    /// the Python standard library, generated WIT bindings, helper utilities,
+    /// and a `symbols.json` config file.  The host must provide these (plus
+    /// the application source) via WASI preopened directories at runtime.
+    #[arg(long)]
+    pub no_snapshot: bool,
+
+    /// Directory to which supporting runtime files are written when
+    /// `--no-snapshot` is used.  Defaults to `runtime/` next to the output.
+    #[arg(long)]
+    pub runtime_dir: Option<PathBuf>,
+
+    /// Comma-separated list of library names to externalize as shared modules,
+    /// or "auto" to use a predefined set of application-agnostic libraries
+    /// (libc, libpython, runtime, libc++, etc.).
+    ///
+    /// When used with `--no-snapshot`, these libraries will NOT be embedded
+    /// in the output component.  Instead, they will be written as separate
+    /// `.wasm` files in a `shared/` directory next to the output, and the
+    /// component will import them as core modules to be provided by the host
+    /// at instantiation time.
+    #[arg(long)]
+    pub shared_modules: Option<String>,
+
+    /// Specify a directory whose Python source files should be embedded
+    /// directly in the component binary.  May be specified more than once.
+    ///
+    /// Unlike `--python-path`, which makes files available at runtime via the
+    /// WASI filesystem, `--embed-path` reads the `.py` files at build time
+    /// and bakes them into the component's linear memory.  The runtime
+    /// registers them as Python modules before importing the app, so the host
+    /// does not need to provide these files.
+    ///
+    /// The directories are also added to the Python path for build-time
+    /// resolution (e.g. native extension discovery).
+    #[arg(short = 'e', long)]
+    pub embed_path: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -189,7 +232,13 @@ fn generate_bindings(common: Common, bindings: Bindings) -> Result<()> {
 }
 
 fn componentize(common: Common, componentize: Componentize) -> Result<()> {
-    let mut python_path = componentize.python_path;
+    let mut python_path = if componentize.python_path.is_empty()
+        && componentize.embed_path.is_empty()
+    {
+        vec![".".to_owned()]
+    } else {
+        componentize.python_path
+    };
 
     for site_packages in find_site_packages()? {
         python_path.push(
@@ -226,6 +275,14 @@ fn componentize(common: Common, componentize: Componentize) -> Result<()> {
             .iter()
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect(),
+        componentize.no_snapshot,
+        componentize.runtime_dir.as_deref(),
+        componentize.shared_modules.as_deref(),
+        &componentize
+            .embed_path
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>(),
     ))?;
 
     if !common.quiet {
@@ -475,6 +532,10 @@ class Bindings(bindings.Bindings):
             module_worlds: vec![],
             output: out_dir.path().join("app.wasm"),
             stub_wasi: false,
+            no_snapshot: false,
+            runtime_dir: None,
+            shared_modules: None,
+            embed_path: vec![],
         };
         componentize(common, componentize_opts)
     }

@@ -17,7 +17,24 @@ use {
 #[allow(clippy::too_many_arguments)]
 #[pyo3::pyfunction]
 #[pyo3(name = "componentize")]
-#[pyo3(signature = (wit_path, world, features, all_features, world_module, python_path, module_worlds, app_name, output_path, stub_wasi, import_interface_names, export_interface_names))]
+#[pyo3(signature = (
+    wit_path,
+    world,
+    features,
+    all_features,
+    world_module,
+    python_path,
+    module_worlds,
+    app_name,
+    output_path,
+    stub_wasi,
+    import_interface_names,
+    export_interface_names,
+    no_snapshot=false,
+    runtime_dir=None,
+    shared_modules=None,
+    embed_path=vec![],
+))]
 fn python_componentize(
     wit_path: Vec<PathBuf>,
     world: Option<&str>,
@@ -31,6 +48,10 @@ fn python_componentize(
     stub_wasi: bool,
     import_interface_names: Vec<(PyBackedStr, PyBackedStr)>,
     export_interface_names: Vec<(PyBackedStr, PyBackedStr)>,
+    no_snapshot: bool,
+    runtime_dir: Option<PathBuf>,
+    shared_modules: Option<&str>,
+    embed_path: Vec<PyBackedStr>,
 ) -> PyResult<()> {
     (|| {
         Runtime::new()?.block_on(crate::componentize(
@@ -56,6 +77,10 @@ fn python_componentize(
                 .iter()
                 .map(|(a, b)| (a.as_ref(), b.as_ref()))
                 .collect(),
+            no_snapshot,
+            runtime_dir.as_deref(),
+            shared_modules,
+            &embed_path.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
         ))
     })()
     .map_err(|e| PyAssertionError::new_err(format!("{e:?}")))

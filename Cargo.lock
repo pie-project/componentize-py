@@ -476,48 +476,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "componentize-py"
-version = "0.20.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "async-trait",
- "bincode",
- "bytes",
- "cap-std",
- "clap",
- "component-init-transform",
- "flate2",
- "fs_extra",
- "futures",
- "heck",
- "hex",
- "im-rc",
- "indexmap",
- "once_cell",
- "predicates",
- "pretty_env_logger",
- "proptest",
- "pyo3",
- "reqwest",
- "semver",
- "serde",
- "tar",
- "tempfile",
- "test-generator",
- "tokio",
- "toml 0.8.23",
- "wasm-encoder 0.244.0",
- "wasmparser 0.244.0",
- "wasmtime",
- "wasmtime-wasi",
- "wit-component",
- "wit-dylib",
- "wit-parser 0.244.0",
- "zstd",
-]
-
-[[package]]
 name = "componentize-py-runtime"
 version = "0.1.0"
 dependencies = [
@@ -525,6 +483,8 @@ dependencies = [
  "num-bigint",
  "once_cell",
  "pyo3",
+ "serde",
+ "serde_json",
  "wit-bindgen 0.52.0",
  "wit-dylib-ffi",
 ]
@@ -866,6 +826,49 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "factored-componentize-py"
+version = "0.20.2"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "async-trait",
+ "bincode",
+ "bytes",
+ "cap-std",
+ "clap",
+ "component-init-transform",
+ "flate2",
+ "fs_extra",
+ "futures",
+ "heck",
+ "hex",
+ "im-rc",
+ "indexmap",
+ "once_cell",
+ "predicates",
+ "pretty_env_logger",
+ "proptest",
+ "pyo3",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "test-generator",
+ "tokio",
+ "toml 0.8.23",
+ "wasm-encoder 0.244.0",
+ "wasmparser 0.244.0",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-component",
+ "wit-dylib",
+ "wit-parser 0.244.0",
+ "zstd",
 ]
 
 [[package]]
@@ -3130,8 +3133,7 @@ dependencies = [
 [[package]]
 name = "wasm-encoder"
 version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "990065f2fe63003fe337b932cfb5e3b80e0b4d0f5ff650e6985b1048f62c8319"
+source = "git+https://github.com/pie-project/wasm-tools.git?branch=v1.244.0-patched#2542034bb83420d190eb3578d767f24c17dee78a"
 dependencies = [
  "leb128fmt",
  "wasmparser 0.244.0",
@@ -3140,8 +3142,7 @@ dependencies = [
 [[package]]
 name = "wasm-metadata"
 version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb0e353e6a2fbdc176932bbaab493762eb1255a7900fe0fea1a2f96c296cc909"
+source = "git+https://github.com/pie-project/wasm-tools.git?branch=v1.244.0-patched#2542034bb83420d190eb3578d767f24c17dee78a"
 dependencies = [
  "anyhow",
  "auditable-serde",
@@ -3172,8 +3173,7 @@ dependencies = [
 [[package]]
 name = "wasmparser"
 version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
+source = "git+https://github.com/pie-project/wasm-tools.git?branch=v1.244.0-patched#2542034bb83420d190eb3578d767f24c17dee78a"
 dependencies = [
  "bitflags",
  "hashbrown 0.15.5",
@@ -3952,8 +3952,7 @@ dependencies = [
 [[package]]
 name = "wit-component"
 version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
+source = "git+https://github.com/pie-project/wasm-tools.git?branch=v1.244.0-patched#2542034bb83420d190eb3578d767f24c17dee78a"
 dependencies = [
  "anyhow",
  "bitflags",
@@ -3971,8 +3970,7 @@ dependencies = [
 [[package]]
 name = "wit-dylib"
 version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf3ed23ad7d72a88d566eaaae4d2b6bc2c3b86a6af92d0b0d6a5511ca6e9b6c9"
+source = "git+https://github.com/pie-project/wasm-tools.git?branch=v1.244.0-patched#2542034bb83420d190eb3578d767f24c17dee78a"
 dependencies = [
  "anyhow",
  "indexmap",
@@ -4006,8 +4004,7 @@ dependencies = [
 [[package]]
 name = "wit-parser"
 version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecc8ac4bc1dc3381b7f59c34f00b67e18f910c2c0f50015669dde7def656a736"
+source = "git+https://github.com/pie-project/wasm-tools.git?branch=v1.244.0-patched#2542034bb83420d190eb3578d767f24c17dee78a"
 dependencies = [
  "anyhow",
  "id-arena",

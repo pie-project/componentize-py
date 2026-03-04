@@ -71,6 +71,213 @@ static FINALIZE: OnceCell<Py<PyAny>> = OnceCell::new();
 static DROP_RESOURCE: OnceCell<Py<PyAny>> = OnceCell::new();
 static SEED: OnceCell<Py<PyAny>> = OnceCell::new();
 static ARGV: OnceCell<Py<PyList>> = OnceCell::new();
+/// Set to `true` when lazy initialization (no-snapshot mode) was used.
+static LAZY_INIT: OnceCell<bool> = OnceCell::new();
+/// App-specific data embedded in the component's linear memory by the __init
+/// module.  Set by `__set_app_data` before the first export call.
+/// Fields: (symbols_ptr, symbols_len, world_module_name_ptr, world_module_name_len,
+///          world_source_ptr, world_source_len, app_sources_ptr, app_sources_len)
+static APP_DATA: OnceCell<(usize, usize, usize, usize, usize, usize, usize, usize)> =
+    OnceCell::new();
+
+/// Called by the synthesized `__init` module at instantiation time to pass
+/// pointers to the app-specific data that was embedded in the component's
+/// data segments.
+#[unsafe(no_mangle)]
+pub extern "C" fn __set_app_data(
+    symbols_ptr: i32,
+    symbols_len: i32,
+    world_ptr: i32,
+    world_len: i32,
+    module_ptr: i32,
+    module_len: i32,
+    app_src_ptr: i32,
+    app_src_len: i32,
+) {
+    APP_DATA
+        .set((
+            symbols_ptr as usize,
+            symbols_len as usize,
+            world_ptr as usize,
+            world_len as usize,
+            module_ptr as usize,
+            module_len as usize,
+            app_src_ptr as usize,
+            app_src_len as usize,
+        ))
+        .expect("__set_app_data called more than once");
+}
+
+// Serde-deserializable types for reading symbols.json in no-snapshot mode.
+mod lazy_symbols {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub struct SymbolsConfig {
+        pub app_name: String,
+        pub stub_wasi: bool,
+        pub symbols: Symbols,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Symbols {
+        pub exports: Vec<FunctionExport>,
+        pub resources: Vec<Resource>,
+        pub records: Vec<Record>,
+        pub flags: Vec<Flags>,
+        pub tuples: Vec<Tuple>,
+        pub variants: Vec<Variant>,
+        pub enums: Vec<Enum>,
+        pub options: Vec<OptionKind>,
+        pub results: Vec<ResultRecord>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct FunctionExport {
+        pub kind: FunctionExportKind,
+        pub return_style: ReturnStyle,
+    }
+
+    #[derive(Deserialize)]
+    pub enum FunctionExportKind {
+        Freestanding { protocol: String, name: String },
+        Constructor { module: String, protocol: String },
+        Method(String),
+        Static { module: String, protocol: String, name: String },
+    }
+
+    #[derive(Deserialize, Clone, Copy)]
+    pub enum ReturnStyle {
+        None,
+        Normal,
+        Result,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Resource {
+        pub package: String,
+        pub name: String,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Record {
+        pub package: String,
+        pub name: String,
+        pub fields: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Flags {
+        pub package: String,
+        pub name: String,
+        pub u32_count: u32,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Tuple {
+        pub count: u32,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Case {
+        pub name: String,
+        pub has_payload: bool,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Variant {
+        pub package: String,
+        pub name: String,
+        pub cases: Vec<Case>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Enum {
+        pub package: String,
+        pub name: String,
+        pub count: u32,
+    }
+
+    #[derive(Deserialize)]
+    pub enum OptionKind {
+        NonNesting,
+        Nesting,
+    }
+
+    #[derive(Deserialize)]
+    pub struct ResultRecord {
+        pub has_ok: bool,
+        pub has_err: bool,
+    }
+
+    /// Convert lazy_symbols types to the WIT-bindgen types used by do_init.
+    impl From<Symbols> for super::Symbols {
+        fn from(s: Symbols) -> Self {
+            use super::exp;
+            Self {
+                exports: s.exports.into_iter().map(|e| exp::FunctionExport {
+                    kind: match e.kind {
+                        FunctionExportKind::Freestanding { protocol, name } =>
+                            super::FunctionExportKind::Freestanding(exp::Function { protocol, name }),
+                        FunctionExportKind::Constructor { module, protocol } =>
+                            super::FunctionExportKind::Constructor(super::Constructor { module, protocol }),
+                        FunctionExportKind::Method(name) =>
+                            super::FunctionExportKind::Method(name),
+                        FunctionExportKind::Static { module, protocol, name } =>
+                            super::FunctionExportKind::Static(super::Static { module, protocol, name }),
+                    },
+                    return_style: match e.return_style {
+                        ReturnStyle::None => super::ReturnStyle::None,
+                        ReturnStyle::Normal => super::ReturnStyle::Normal,
+                        ReturnStyle::Result => super::ReturnStyle::Result,
+                    },
+                }).collect(),
+                resources: s.resources.into_iter().map(|r| exp::Resource { package: r.package, name: r.name }).collect(),
+                records: s.records.into_iter().map(|r| exp::Record { package: r.package, name: r.name, fields: r.fields }).collect(),
+                flags: s.flags.into_iter().map(|f| exp::Flags { package: f.package, name: f.name, u32_count: f.u32_count }).collect(),
+                tuples: s.tuples.into_iter().map(|t| exp::Tuple { count: t.count }).collect(),
+                variants: s.variants.into_iter().map(|v| exp::Variant {
+                    package: v.package,
+                    name: v.name,
+                    cases: v.cases.into_iter().map(|c| exp::Case { name: c.name, has_payload: c.has_payload }).collect(),
+                }).collect(),
+                enums: s.enums.into_iter().map(|e| exp::Enum { package: e.package, name: e.name, count: e.count }).collect(),
+                options: s.options.into_iter().map(|o| match o {
+                    OptionKind::NonNesting => super::OptionKind::NonNesting,
+                    OptionKind::Nesting => super::OptionKind::Nesting,
+                }).collect(),
+                results: s.results.into_iter().map(|r| super::ResultRecord { has_ok: r.has_ok, has_err: r.has_err }).collect(),
+            }
+        }
+    }
+}
+
+/// Perform lazy initialization.
+///
+/// If `__set_app_data` was called (data embedded in Wasm memory), reads
+/// symbols.json from linear memory.  Otherwise falls back to reading
+/// `/symbols.json` from the WASI filesystem.
+fn lazy_init() {
+    let config_str = if let Some(&(sym_ptr, sym_len, ..)) = APP_DATA.get() {
+        unsafe {
+            str::from_utf8(slice::from_raw_parts(sym_ptr as *const u8, sym_len))
+                .expect("invalid UTF-8 in embedded symbols.json")
+                .to_string()
+        }
+    } else {
+        std::fs::read_to_string("/symbols.json")
+            .expect("Failed to read /symbols.json -- ensure it is provided via a WASI preopened directory")
+    };
+
+    let config: lazy_symbols::SymbolsConfig = serde_json::from_str(&config_str)
+        .expect("Failed to parse symbols.json");
+
+    let symbols: Symbols = config.symbols.into();
+    do_init(config.app_name, symbols, config.stub_wasi, true)
+        .expect("Lazy initialization failed");
+
+    LAZY_INIT.set(true).unwrap();
+}
 
 struct Borrow {
     value: Py<PyAny>,
@@ -904,12 +1111,169 @@ fn componentize_py_module(_py: Python<'_>, module: &Bound<PyModule>) -> PyResult
     Ok(())
 }
 
-fn do_init(app_name: String, symbols: Symbols, stub_wasi: bool) -> Result<(), String> {
+fn deserialize_module_archive<'a>(archive: &'a [u8]) -> Vec<(&'a str, &'a str)> {
+    let mut off = 0usize;
+    let read_u32 = |o: &mut usize| -> u32 {
+        let v = u32::from_le_bytes(archive[*o..*o + 4].try_into().unwrap());
+        *o += 4;
+        v
+    };
+    let count = read_u32(&mut off) as usize;
+    let mut entries: Vec<(&str, &str)> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let nl = read_u32(&mut off) as usize;
+        let name = str::from_utf8(&archive[off..off + nl])
+            .expect("invalid UTF-8 in embedded module name");
+        off += nl;
+        let sl = read_u32(&mut off) as usize;
+        let src = str::from_utf8(&archive[off..off + sl])
+            .expect("invalid UTF-8 in embedded module source");
+        off += sl;
+        entries.push((name, src));
+    }
+    entries.sort_by_key(|(name, _)| name.matches('.').count());
+    entries
+}
+
+fn do_init(app_name: String, symbols: Symbols, stub_wasi: bool, lazy: bool) -> Result<(), String> {
     pyo3::append_to_inittab!(componentize_py_module);
 
     Python::initialize();
 
     let init = |py: Python| {
+        if let Some(&(_, _, _name_ptr, _name_len, src_ptr, src_len, asrc_ptr, asrc_len)) =
+            APP_DATA.get()
+        {
+            let sys_modules = py.import("sys")?.getattr("modules")?;
+            let types_mod = py.import("types")?;
+            let builtins = py.import("builtins")?;
+
+            // --- World modules: two-phase load (self-contained package) ---
+            let mut world_entries: Vec<(&str, &str)> = Vec::new();
+            if src_len > 0 {
+                let archive = unsafe {
+                    slice::from_raw_parts(src_ptr as *const u8, src_len)
+                };
+                world_entries.extend(deserialize_module_archive(archive));
+            }
+
+            let world_names: Vec<&str> =
+                world_entries.iter().map(|(n, _)| *n).collect();
+            let is_world_package = |name: &str| -> bool {
+                let prefix = format!("{name}.");
+                world_names.iter().any(|n| n.starts_with(&prefix))
+            };
+
+            let mut world_modules: Vec<Bound<'_, PyAny>> =
+                Vec::with_capacity(world_entries.len());
+            for (mod_name, _) in &world_entries {
+                if let Some(dot_pos) = mod_name.rfind('.') {
+                    let parent_name = &mod_name[..dot_pos];
+                    if !sys_modules.contains(parent_name)? {
+                        let parent =
+                            types_mod.call_method1("ModuleType", (parent_name,))?;
+                        parent
+                            .setattr("__path__", pyo3::types::PyList::empty(py))?;
+                        parent.setattr("__package__", parent_name)?;
+                        sys_modules.set_item(parent_name, &parent)?;
+                    }
+                }
+
+                let module = types_mod.call_method1("ModuleType", (mod_name,))?;
+                if is_world_package(mod_name) {
+                    module
+                        .setattr("__path__", pyo3::types::PyList::empty(py))?;
+                }
+                if mod_name.contains('.') {
+                    let parent = &mod_name[..mod_name.rfind('.').unwrap()];
+                    module.setattr("__package__", parent)?;
+                } else if is_world_package(mod_name) {
+                    module.setattr("__package__", *mod_name)?;
+                }
+                sys_modules.set_item(*mod_name, &module)?;
+                world_modules.push(module);
+            }
+
+            for (i, (mod_name, source)) in world_entries.iter().enumerate() {
+                let code =
+                    builtins
+                        .getattr("compile")?
+                        .call1((*source, *mod_name, "exec"))?;
+                builtins
+                    .getattr("exec")?
+                    .call1((code, world_modules[i].getattr("__dict__")?))?;
+            }
+
+            // --- App modules: install a meta_path finder so Python's
+            //     import machinery handles dependency ordering naturally ---
+            if asrc_len > 0 {
+                let archive = unsafe {
+                    slice::from_raw_parts(asrc_ptr as *const u8, asrc_len)
+                };
+                let app_entries = deserialize_module_archive(archive);
+
+                let app_names: Vec<&str> =
+                    app_entries.iter().map(|(n, _)| *n).collect();
+
+                let sources_dict = pyo3::types::PyDict::new(py);
+                for (name, src) in &app_entries {
+                    sources_dict.set_item(*name, *src)?;
+                }
+
+                let packages_list = pyo3::types::PyList::empty(py);
+                for name in &app_names {
+                    let prefix = format!("{name}.");
+                    if app_names.iter().any(|n| n.starts_with(&prefix)) {
+                        packages_list.append(*name)?;
+                    }
+                }
+
+                let ns = pyo3::types::PyDict::new(py);
+                ns.set_item("_sources", sources_dict)?;
+                ns.set_item("_packages", packages_list)?;
+
+                let setup_code = r#"
+import importlib.abc
+import importlib.machinery
+import sys
+
+class _EmbeddedAppFinder(importlib.abc.MetaPathFinder):
+    def __init__(self, sources, packages):
+        self._sources = sources
+        self._packages = set(packages)
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname not in self._sources:
+            return None
+        is_pkg = fullname in self._packages
+        return importlib.machinery.ModuleSpec(
+            fullname,
+            _EmbeddedAppLoader(self._sources[fullname], is_pkg),
+            is_package=is_pkg,
+        )
+
+class _EmbeddedAppLoader(importlib.abc.Loader):
+    def __init__(self, source, is_package):
+        self._source = source
+        self._is_package = is_package
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        if self._is_package:
+            module.__path__ = []
+        code = compile(self._source, module.__name__, "exec")
+        exec(code, module.__dict__)
+
+sys.meta_path.insert(0, _EmbeddedAppFinder(_sources, _packages))
+"#;
+                builtins
+                    .getattr("exec")?
+                    .call1((setup_code, ns))?;
+            }
+        }
+
         let app = py.import(app_name.as_str())?;
 
         STUB_WASI.set(stub_wasi).unwrap();
@@ -1093,10 +1457,15 @@ fn do_init(app_name: String, symbols: Symbols, stub_wasi: bool) -> Result<(), St
             .downcast_into::<PyMapping>()
             .unwrap();
 
-        let keys = environ.keys()?;
-
-        for i in 0..keys.len() {
-            environ.del_item(keys.get_item(i)?)?;
+        // In the snapshot path (lazy=false), clear env vars -- they'll be
+        // re-populated from the host at runtime after snapshot restore.
+        // In the lazy path (lazy=true), env vars are already correct at
+        // runtime, so don't clear them.
+        if !lazy {
+            let keys = environ.keys()?;
+            for i in 0..keys.len() {
+                environ.del_item(keys.get_item(i)?)?;
+            }
         }
 
         ENVIRON.set(environ.into()).unwrap();
@@ -1155,8 +1524,11 @@ fn do_init(app_name: String, symbols: Symbols, stub_wasi: bool) -> Result<(), St
             .downcast_into::<PyList>()
             .unwrap();
 
-        for i in 0..argv.len() {
-            argv.del_item(i)?;
+        // Same as environ: only clear argv in snapshot mode, not in lazy mode.
+        if !lazy {
+            for i in 0..argv.len() {
+                argv.del_item(i)?;
+            }
         }
 
         ARGV.set(argv.into()).unwrap();
@@ -1178,7 +1550,7 @@ struct MyExports;
 
 impl Guest for MyExports {
     fn init(app_name: String, symbols: Symbols, stub_wasi: bool) -> Result<(), String> {
-        let result = do_init(app_name, symbols, stub_wasi);
+        let result = do_init(app_name, symbols, stub_wasi, false);
 
         // This tells the WASI Preview 1 component adapter to reset its state.
         // In particular, we want it to forget about any open handles and
@@ -1211,8 +1583,19 @@ struct MyInterpreter;
 
 impl MyInterpreter {
     fn export_call_(func: ExportFunction, cx: &mut MyCall<'_>, async_: bool) -> u32 {
+        // If EXPORTS is None, no snapshot was taken and do_init was never
+        // called during build.  Perform lazy initialization from symbols.json.
+        if EXPORTS.get().is_none() {
+            lazy_init();
+        }
+
         Python::attach(|py| {
-            if !*STUB_WASI.get().unwrap() {
+            // In the snapshot path, env/argv/seed were baked in at build time
+            // and need to be refreshed from the host on first call.
+            // In lazy-init mode, they are already correct, so skip this.
+            if !LAZY_INIT.get().copied().unwrap_or(false)
+                && !*STUB_WASI.get().unwrap()
+            {
                 static ONCE: Once = Once::new();
                 ONCE.call_once(|| {
                     // We must call directly into the host to get the runtime

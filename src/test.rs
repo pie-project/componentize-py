@@ -81,6 +81,10 @@ async fn make_component(
         false,
         &HashMap::new(),
         &HashMap::new(),
+        false,
+        None,
+        None,
+        &[],
     )
     .await?;
 
