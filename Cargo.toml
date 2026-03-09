@@ -1,6 +1,6 @@
 [package]
 name = "factored-componentize-py"
-version = "0.20.3"
+version = "0.20.4"
 edition = "2024"
 exclude = ["cpython"]
 
@@ -90,3 +90,6 @@ wasmparser = { git = "https://github.com/pie-project/wasm-tools.git", branch = "
 wit-parser = { git = "https://github.com/pie-project/wasm-tools.git", branch = "v1.244.0-patched" }
 wasm-metadata = { git = "https://github.com/pie-project/wasm-tools.git", branch = "v1.244.0-patched" }
 wit-dylib = { git = "https://github.com/pie-project/wasm-tools.git", branch = "v1.244.0-patched" }
+
+[patch."https://github.com/dicej/wasm-tools"]
+wit-dylib-ffi = { git = "https://github.com/pie-project/wasm-tools.git", branch = "v1.244.0-patched" }

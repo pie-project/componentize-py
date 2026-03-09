@@ -108,6 +108,34 @@ pub extern "C" fn __set_app_data(
         .expect("__set_app_data called more than once");
 }
 
+/// Called by the host (via a component-level export) to trigger lazy
+/// initialization and then reset WASI adapter state, preparing the
+/// component for a memory snapshot.  After this returns the linear memory
+/// contains a fully-initialized Python interpreter with clean WASI state.
+#[unsafe(no_mangle)]
+pub extern "C" fn __prepare_snapshot() {
+    if EXPORTS.get().is_none() {
+        lazy_init();
+    }
+
+    #[link(wasm_import_module = "wasi_snapshot_preview1")]
+    unsafe extern "C" {
+        #[link_name = "reset_adapter_state"]
+        fn reset_adapter_state();
+    }
+
+    #[link(wasm_import_module = "env")]
+    unsafe extern "C" {
+        #[link_name = "__wasilibc_reset_preopens"]
+        fn wasilibc_reset_preopens();
+    }
+
+    unsafe {
+        reset_adapter_state();
+        wasilibc_reset_preopens();
+    }
+}
+
 // Serde-deserializable types for reading symbols.json in no-snapshot mode.
 mod lazy_symbols {
     use serde::Deserialize;
@@ -1702,7 +1730,11 @@ impl Interpreter for MyInterpreter {
     type CallCx<'a> = MyCall<'a>;
 
     fn initialize(wit: Wit) {
-        WIT.set(wit).map_err(drop).unwrap();
+        // Idempotent: after a host-side snapshot the runtime module is
+        // stripped, so WIT retains its snapshot value.  When the
+        // embedded bindings module re-runs its constructor it calls
+        // this again with the same pointer — silently ignore.
+        let _ = WIT.set(wit);
     }
 
     fn export_start<'a>(_: Wit, _: ExportFunction) -> Box<MyCall<'a>> {
