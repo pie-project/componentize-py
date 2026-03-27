@@ -114,9 +114,7 @@ pub extern "C" fn __set_app_data(
 /// contains a fully-initialized Python interpreter with clean WASI state.
 #[unsafe(no_mangle)]
 pub extern "C" fn __prepare_snapshot() {
-    if EXPORTS.get().is_none() {
-        lazy_init();
-    }
+    ensure_init();
 
     #[link(wasm_import_module = "wasi_snapshot_preview1")]
     unsafe extern "C" {
@@ -277,6 +275,20 @@ mod lazy_symbols {
                 results: s.results.into_iter().map(|r| super::ResultRecord { has_ok: r.has_ok, has_err: r.has_err }).collect(),
             }
         }
+    }
+}
+
+/// Ensure the Python interpreter is initialized.
+///
+/// Must be called before any code that uses `Python::attach`.  This is
+/// needed because the WIT dylib ABI marshals export parameters (via
+/// `push_*` on the `Call` trait) *before* `export_call` runs, and those
+/// methods use `Python::attach`.  Without this guard the interpreter
+/// would not be initialized when a `--no-snapshot` component is first
+/// called with parameters.
+fn ensure_init() {
+    if EXPORTS.get().is_none() {
+        lazy_init();
     }
 }
 
@@ -1611,11 +1623,7 @@ struct MyInterpreter;
 
 impl MyInterpreter {
     fn export_call_(func: ExportFunction, cx: &mut MyCall<'_>, async_: bool) -> u32 {
-        // If EXPORTS is None, no snapshot was taken and do_init was never
-        // called during build.  Perform lazy initialization from symbols.json.
-        if EXPORTS.get().is_none() {
-            lazy_init();
-        }
+        ensure_init();
 
         Python::attach(|py| {
             // In the snapshot path, env/argv/seed were baked in at build time
@@ -1738,6 +1746,7 @@ impl Interpreter for MyInterpreter {
     }
 
     fn export_start<'a>(_: Wit, _: ExportFunction) -> Box<MyCall<'a>> {
+        ensure_init();
         Box::new(MyCall::new(Vec::new()))
     }
 
