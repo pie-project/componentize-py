@@ -470,6 +470,39 @@ fn make_pyo3_config(repo_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Compile the small `rustc` wrapper used to force deterministic
+/// `StableCrateId` hashes when building `componentize-py-runtime`. The shim
+/// is compiled once per `make_runtime` invocation; the same binary can be
+/// reused across the sync and async runtime builds.
+///
+/// See `build-support/rustc_shim.rs` and the comment block in `make_runtime`
+/// for why this is needed.
+fn build_rustc_shim(out_dir: &Path) -> Result<PathBuf> {
+    println!("cargo:rerun-if-changed=build-support/rustc_shim.rs");
+
+    const SHIM_SRC: &str = include_str!("build-support/rustc_shim.rs");
+
+    let src_path = out_dir.join("rustc_shim.rs");
+    fs::write(&src_path, SHIM_SRC)?;
+
+    let bin_name = if cfg!(windows) {
+        "rustc_shim.exe"
+    } else {
+        "rustc_shim"
+    };
+    let bin_path = out_dir.join(bin_name);
+
+    run(Command::new("rustc")
+        .arg("-O")
+        .arg("--edition=2021")
+        .arg("-o")
+        .arg(&bin_path)
+        .arg(&src_path))
+    .context("failed to compile build-support/rustc_shim.rs")?;
+
+    Ok(bin_path)
+}
+
 fn make_runtime(
     out_dir: &Path,
     wasi_sdk: &Path,
@@ -504,12 +537,29 @@ fn make_runtime(
 
     let target = if async_ { "async" } else { "sync" };
 
+    // Force `StableCrateId` (and therefore every `Cs<HASH>_` token in the
+    // resulting wasm) to be a pure function of `(crate_name, crate_version)`
+    // so that `componentize-py-runtime.wasm` is byte-stable across rustc
+    // versions, cargo lockfile drift, and host platforms. Without this, an
+    // app component built by one installation of the tool cannot link
+    // against the shared modules produced by another.
+    //
+    // - `RUSTC_WRAPPER` rewrites the `-C metadata=...` cargo injects into a
+    //   deterministic value (see build-support/rustc_shim.rs).
+    // - `RUSTC_FORCE_RUSTC_VERSION` overrides the rustc-version contribution
+    //   to `StableCrateId::new`. It is documented as a testing aid but has
+    //   been the only override path for years; if it ever gets removed,
+    //   fall back to a post-process rewrite of the runtime wasm.
+    let shim = build_rustc_shim(out_dir)?;
+
     cmd.env(
         "RUSTFLAGS",
         "-C relocation-model=pic --cfg pyo3_disable_reference_pool",
     )
     .env("CARGO_TARGET_DIR", out_dir.join(target))
-    .env("PYO3_CONFIG_FILE", out_dir.join("pyo3-config.txt"));
+    .env("PYO3_CONFIG_FILE", out_dir.join("pyo3-config.txt"))
+    .env("RUSTC_WRAPPER", &shim)
+    .env("RUSTC_FORCE_RUSTC_VERSION", "componentize-py-abi-v1");
 
     let status = cmd.status()?;
     assert!(status.success());
