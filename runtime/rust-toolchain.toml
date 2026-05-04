@@ -1,0 +1,47 @@
+# Pinned nightly for componentize-py-runtime.
+#
+# Why nightly at all
+# ------------------
+# The runtime is built into a PIC wasm32-wasip1 dynamic-linking shared
+# module, which means `std` and `panic_abort` must be rebuilt from source
+# with the same `-C relocation-model=pic` RUSTFLAGS as the runtime
+# itself. That requires `cargo build -Z build-std=...`, which is gated
+# to nightly cargo. See `build.rs::make_runtime` for the invocation.
+#
+# Why pinned
+# ----------
+# rustc's `mangle_internal_symbol` (allocator/panic-handler shim) hashes
+# the real rustc version string into its `Cs<HASH>_` disambiguator and
+# explicitly ignores `RUSTC_FORCE_RUSTC_VERSION` -- see the comment at
+# compiler/rustc_symbol_mangling/src/v0.rs::mangle_internal_symbol in
+# the rustc source. So even with the RUSTC_WRAPPER stabilising every
+# other crate's StableCrateId, the 18 `___rustc` symbols would still
+# drift across hosts whenever the floating `nightly` channel resolved
+# to different toolchains (which is what caused the mac-vs-linux link
+# failure investigated in docs/stable-runtime-symbols.md).
+#
+# Pinning here makes `tcx.sess.cfg_version` identical on every machine,
+# which in turn makes `componentize-py-runtime.wasm` byte-stable across
+# hosts at the symbol level.
+#
+# Choice of nightly-2026-02-28
+# ----------------------------
+# Last 1.95.0-nightly snapshot. That codebase subsequently shipped as
+# 1.95.0-beta and then as 1.95.0 stable on 2026-04-16, so it has had
+# ~6 weeks of beta soak plus ~2.5 weeks as a stable release behind it
+# at the time this file was written -- a known-good, well-tested
+# revision rather than a fresh nightly.
+#
+# Bumping this channel
+# --------------------
+# Bumping it is an ABI-breaking change for the runtime: every
+# previously-built application component carries the old `___rustc`
+# `Cs<HASH>_` in its expected-type for the runtime core module, and a
+# runtime built under a new nightly will not satisfy that subtype
+# check. Bump in lockstep with a `componentize-py-abi-v1` ->
+# `componentize-py-abi-v2` style transition (see the wrapper's metadata
+# tag in build-support/rustc_shim.rs).
+[toolchain]
+channel = "nightly-2026-02-28"
+components = ["rust-src"]
+profile = "minimal"

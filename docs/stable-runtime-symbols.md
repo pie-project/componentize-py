@@ -28,12 +28,20 @@ and how the fix wired into [`build.rs`](../build.rs) and
   app components carried *the names they observed at build time* into their
   import tables — tying each app to one specific runtime build.
 
-- **Fix.** A tiny `RUSTC_WRAPPER` shim rewrites every `-C metadata=…` to a
-  deterministic value derived from `(crate_name, crate_version)`, and
-  `RUSTC_FORCE_RUSTC_VERSION` pins the rustc-version contribution. Together
-  they make `StableCrateId` a pure function of `(crate_name, crate_version)`,
-  so two independent installations produce byte-identical
-  `componentize-py-runtime.wasm` (verified — see [§8](#8-how-to-verify)).
+- **Fix.** Three collaborating pieces:
+  1. A tiny `RUSTC_WRAPPER` shim rewrites every `-C metadata=…` to a
+     deterministic value derived from `(crate_name, crate_version)`.
+  2. `RUSTC_FORCE_RUSTC_VERSION` pins the `cfg_version` contribution to
+     `StableCrateId::new` for *normal* crates.
+  3. A `runtime/rust-toolchain.toml` file pins the nightly toolchain
+     itself, because rustc's allocator/panic-handler shim crate
+     (`___rustc`) intentionally hashes the *real* rustc version into
+     its mangled name and explicitly ignores `RUSTC_FORCE_RUSTC_VERSION`.
+
+  Together these make every `Cs<HASH>_` in `componentize-py-runtime.wasm`
+  a pure function of `(crate_name, crate_version, pinned_nightly)`, so two
+  independent installations produce byte-identical runtime wasm
+  (verified — see [§8](#8-how-to-verify)).
 
 ---
 
@@ -92,6 +100,31 @@ runtime B exports: _RNvNtNtCsioJB8758LAq_4pyo38internal5state15register_decref
 
 Logically the same function in `pyo3::internal::state::register_decref`, but
 with a `Cs<HASH>_` token derived from a *different* `StableCrateId`.
+
+### 2.1 A second failure mode found in production
+
+After the wrapper described in [§6.1–6.2](#6-the-fix) was deployed, a
+second variant of the same failure was reported: an app component built on
+**macOS** still failed to load against shared modules built on **Linux**,
+even when both hosts ran the same `cargo +1.95.0 build` against the same
+source tree. Comparing the two `componentize-py-runtime.wasm` files:
+
+```text
+Cs tag set diff (mac runtime vs linux runtime):
+  Cs7tEtGGQCaN4_   (linux only)
+  CscXdVywKbHIJ_   (mac only)
+```
+
+Out of 28 distinct `Cs<HASH>_` tokens in each runtime, **27 matched and
+exactly one differed**. The differing token belonged to 18 symbols, all of
+the form `_RNvCs<TAG>_7___rustc...` — the rustc-internal allocator and
+panic-handler shim crate. Those 18 names are also baked into the app
+component's *expected type* for the `componentize-py-runtime` core module,
+and the component-model subtype check fails when the expected names are not
+exports of the runtime the host actually loads.
+
+This pointed at one specific gap in the wrapper-based fix, addressed by
+the toolchain pin described in [§6.3](#63-runtimerust-toolchaintoml).
 
 ---
 
@@ -170,15 +203,16 @@ A few approaches looked appealing but were rejected:
 | **`-C metadata=…` via `[build].rustflags`** | Same as above. |
 | **`#[no_mangle]` on the public surface** | The runtime's *public* surface is small (`__set_app_data`, `__prepare_snapshot`, `cabi_realloc`, …). The 2,188 problem symbols are *transitive internals* from `pyo3`, `core`, etc., that the wasm32-wasip1 PIC ABI forces across the GOT. We would have to fork every dependency. |
 | **Post-process the wasm to rewrite mangled names** | Possible, but invasive: must parse the wasm, rewrite name section + export/import sections + GOT relocations, all without breaking link semantics. Strictly more code than the wrapper. |
+| **Use the wrapper alone (no nightly pin)** | Covers ~98% of the symbols but misses the 18 `___rustc` allocator/panic-shim exports. Those go through `rustc::mangle_internal_symbol`, which hashes `tcx.sess.cfg_version` directly and explicitly ignores `RUSTC_FORCE_RUSTC_VERSION` (see [`compiler/rustc_symbol_mangling/src/v0.rs`](https://github.com/rust-lang/rust/blob/master/compiler/rustc_symbol_mangling/src/v0.rs#L87) — the comment says: *"RUSTC_FORCE_RUSTC_VERSION is ignored here as otherwise different we would get an abi incompatibility with the standard library"*). The only knob is to actually pin the rustc version, hence [§6.3](#63-runtimerust-toolchaintoml). |
 
-The wrapper is the smallest knob that targets the actual root cause —
-`StableCrateId` — directly.
+The wrapper plus the toolchain pin are the smallest knobs that target the
+actual root causes — `StableCrateId` and `cfg_version` — directly.
 
 ---
 
 ## 6. The fix
 
-Two collaborating pieces, both in this repo. **No change to `src/`.**
+Three collaborating pieces, all in this repo. **No change to `src/`.**
 
 ### 6.1 `build-support/rustc_shim.rs`
 
@@ -199,7 +233,7 @@ intentionally break ABI, bump it.
 
 ### 6.2 `build.rs::make_runtime`
 
-Two changes:
+Two env vars are added to the existing `cmd.env(...)` chain:
 
 ```rust
 let shim = build_rustc_shim(out_dir)?;
@@ -221,22 +255,57 @@ for years, but it *is* documented as a testing aid — the comment block in
 `make_runtime` flags this and notes that the fallback if it ever disappears
 is the post-process rewrite mentioned in the table above.
 
-### 6.3 What this guarantees
+### 6.3 `runtime/rust-toolchain.toml`
 
-After the change, every input to `StableCrateId::new` is fixed:
+The wrapper covers cargo-tracked crates, but rustc *itself* synthesises a
+small `___rustc` shim crate during compilation of any binary or `cdylib` that
+needs a global allocator and panic handler. That shim's symbols are mangled
+by [`rustc::mangle_internal_symbol`](https://github.com/rust-lang/rust/blob/master/compiler/rustc_symbol_mangling/src/v0.rs#L87),
+which deliberately hashes `tcx.sess.cfg_version` directly and ignores
+`RUSTC_FORCE_RUSTC_VERSION`. Cargo never invokes `rustc --crate-name ___rustc`,
+so the wrapper is never given the chance to rewrite `-C metadata` for it.
 
-| Input | Pinned to |
-| --- | --- |
-| `crate_name` | The crate's name (already stable). |
-| `metadata` | `componentize-py-abi-v1::<crate_name>::<crate_version>`, courtesy of the wrapper. |
-| `is_exe` | The crate's type (already stable). |
-| `cfg_version` | `componentize-py-abi-v1`, courtesy of `RUSTC_FORCE_RUSTC_VERSION`. |
+The only way to stabilise those 18 `___rustc`-prefixed `Cs<HASH>_` tokens is
+to pin the actual rustc version that compiles the runtime crate.
+`runtime/rust-toolchain.toml` does exactly that:
+
+```toml
+[toolchain]
+channel = "nightly-2026-02-28"
+components = ["rust-src"]
+profile = "minimal"
+```
+
+The pinned date is the last 1.95.0-nightly snapshot — that codebase later
+shipped as 1.95.0-beta and then as 1.95.0 stable, so the revision has had
+several weeks of beta soak followed by a stable release before being adopted
+here. `rust-src` is required for `-Z build-std=panic_abort,std`; `profile =
+"minimal"` keeps `rustup` from pulling tools we do not need.
+
+`build.rs::make_runtime` no longer wraps the cargo invocation with `rustup
+run nightly`; it just invokes `cargo`, and the toolchain file in
+`runtime/` causes cargo to delegate to the pinned nightly automatically
+(installing it on first run via `rustup`).
+
+### 6.4 What this guarantees
+
+After the change, every input to `StableCrateId::new` is fixed for *both*
+cargo-tracked crates and rustc-internal mangling:
+
+| Input | Pinned to | Mechanism |
+| --- | --- | --- |
+| `crate_name` | The crate's name (already stable). | — |
+| `metadata` | `componentize-py-abi-v1::<crate_name>::<crate_version>`. | wrapper rewrites `-C metadata=…` |
+| `is_exe` | The crate's type (already stable). | — |
+| `cfg_version` (regular crates) | The constant `componentize-py-abi-v1`. | `RUSTC_FORCE_RUSTC_VERSION` |
+| `cfg_version` (`mangle_internal_symbol`) | The version string of the pinned nightly. | `runtime/rust-toolchain.toml` |
 
 The resulting `Cs<HASH>_` token is therefore a pure function of
-`(crate_name, crate_version)`, which by Cargo's own resolver semantics is a
-content-addressed identity. Two installations of the tool on two machines
-with two different rustc versions, that resolve to the same dependency
-versions, will emit byte-identical `componentize-py-runtime.wasm`.
+`(crate_name, crate_version)` for ordinary crates and of `(crate_name,
+pinned_nightly_version)` for the `___rustc` shim. Both are content-addressed
+identities. Two installations of the tool on two machines (regardless of
+host OS or the user's *outer* `rustup default`) will emit byte-identical
+`componentize-py-runtime.wasm`.
 
 ---
 
@@ -261,6 +330,21 @@ versions, will emit byte-identical `componentize-py-runtime.wasm`.
   granularity as semver promises and feels right.
 - **rustc compiler upgrades that change the v0 mangling scheme.** Out of
   scope of this fix; would also be a Rust-wide event.
+- **Bumping the pinned nightly is an ABI-breaking change for the runtime.**
+  Every previously-built application component embeds the old `___rustc`
+  `Cs<HASH>_` in its expected-type for the runtime core module, and a runtime
+  built under a different nightly will not satisfy that subtype check. The
+  `runtime/rust-toolchain.toml` header documents this; bump it in lockstep
+  with a `componentize-py-abi-v1` → `componentize-py-abi-v2` style transition
+  in the wrapper's metadata tag, and rebuild every shipped app component.
+- **Why nightly at all.** `-Z build-std=panic_abort,std` is needed to
+  recompile `std` with `-C relocation-model=pic` (pre-built `std` from
+  rustup is not PIC and therefore cannot be linked into a wasm32-wasip1
+  PIC dynamic-linking shared module) and to swap unwinding panics for
+  `panic_abort` (WASI preview1 has no exception mechanism). Both are
+  unstable cargo flags; until `-Z build-std` stabilises upstream, nightly
+  is the only option, and pinning a known-good nightly is the right
+  containment.
 
 ---
 
@@ -331,6 +415,7 @@ combinations, by design — they were built with drifting disambiguators.
 | Path | Role |
 | --- | --- |
 | [`build-support/rustc_shim.rs`](../build-support/rustc_shim.rs) | The wrapper binary. Compiled at build time, invoked by cargo per `rustc` call. |
-| [`build.rs`](../build.rs) (`build_rustc_shim`, `make_runtime`) | Compiles the shim, wires `RUSTC_WRAPPER` + `RUSTC_FORCE_RUSTC_VERSION` into the runtime build. |
+| [`build.rs`](../build.rs) (`build_rustc_shim`, `make_runtime`) | Compiles the shim, wires `RUSTC_WRAPPER` + `RUSTC_FORCE_RUSTC_VERSION` into the runtime build, and invokes `cargo` directly (no `rustup run nightly`) so the toolchain file in `runtime/` is honoured. |
+| [`runtime/rust-toolchain.toml`](../runtime/rust-toolchain.toml) | Pins the nightly toolchain used to compile the runtime. Required because rustc's `mangle_internal_symbol` ignores `RUSTC_FORCE_RUSTC_VERSION`. |
 | [`runtime/`](../runtime) | The `componentize-py-runtime` Rust crate whose mangled symbols this fix stabilises. |
 | [`src/link.rs`](../src/link.rs) | The host-side linker that turns shared modules into app components and synthesises `__init`. |

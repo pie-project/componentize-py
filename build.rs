@@ -510,11 +510,24 @@ fn make_runtime(
     async_: bool,
     name: &str,
 ) -> Result<()> {
-    let mut cmd = Command::new("rustup");
+    // We invoke `cargo` (not `rustup run nightly cargo`) and rely on the
+    // `runtime/rust-toolchain.toml` file to select the pinned nightly. That
+    // pin is load-bearing for symbol stability: rustc's allocator/panic
+    // shim crate (`___rustc`) hashes the *real* rustc version into its
+    // mangled-name disambiguator and explicitly ignores
+    // `RUSTC_FORCE_RUSTC_VERSION` (see compiler/rustc_symbol_mangling/
+    // src/v0.rs::mangle_internal_symbol). A floating `nightly` channel
+    // would therefore leak host-specific rustc versions into 18
+    // `_RNvCs<HASH>_7___rustc...` exports of the runtime, breaking
+    // cross-host link compatibility despite the RUSTC_WRAPPER fix.
+    //
+    // The `-Z build-std` is what forces nightly in the first place: the
+    // runtime is a PIC wasm32-wasip1 shared module, so `std` must be
+    // rebuilt from source with the same `-C relocation-model=pic`
+    // RUSTFLAGS. Pre-built `std` shipped via `rustup target add` is not
+    // PIC and cannot be linked in.
+    let mut cmd = Command::new("cargo");
     cmd.current_dir("runtime")
-        .arg("run")
-        .arg("nightly")
-        .arg("cargo")
         .arg("build")
         .arg("-Z")
         .arg("build-std=panic_abort,std")
